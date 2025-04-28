@@ -1,11 +1,14 @@
-Cryptocurrency Temporal Structure Analysis and Clustering
-Overview
+##Cryptocurrency Temporal Structure Analysis and Clustering
+
+##Overview
+
 This project aims to perform a comprehensive Temporal Structure Analysis, Clustering, and Exploratory Data Analysis (EDA) on 30 cryptocurrencies.
 It follows a structured approach involving data collection, grouping, correlation analysis, and deep temporal exploration of selected cryptocurrencies, forming a foundation for predictive modeling and trading signal generation (in upcoming stages).
 
 The project is divided into 7 main steps, of which the first 4 are completed.
 
 Completed Tasks
+
 1. Data Collection
 Downloaded historical price data for 30 cryptocurrencies (minimum 1 year) using online financial data providers like Yahoo Finance.
 
