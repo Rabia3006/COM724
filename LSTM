@@ -1,0 +1,163 @@
+import numpy as np
+import yfinance as yf
+import pandas as pd
+import datetime as dt
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential, load_model
+from tensorflow.keras.layers import Dense, Dropout, LSTM
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+import joblib
+import os
+import warnings
+
+warnings.filterwarnings("ignore")
+
+# Define paths for saving models
+model_dir = "models"
+if not os.path.exists(model_dir):
+    os.makedirs(model_dir)
+
+def save_lstm_model(model, filename):
+    model.save(os.path.join(model_dir, filename))
+
+def load_lstm_model(filename):
+    return load_model(os.path.join(model_dir, filename))
+
+# Set the start and end dates for the last 5 years
+end_date = dt.datetime.now()
+start_date = end_date - dt.timedelta(days=5*365)
+
+# Fetch data for the selected cryptocurrencies
+data = {}
+for crypto in selected_cryptocurrencies:
+    try:
+        # Download historical data using yfinance
+        hist_data = yf.download(crypto, start=start_date, end=end_date)
+
+        # Check if data is available for the last 5 years
+        if not hist_data.empty:
+            # Filter out cryptocurrencies with insufficient data
+            if len(hist_data) >= 5 * 365:
+                data[crypto] = hist_data
+    except Exception as e:
+        print(f"Could not fetch data for {crypto}: {e}")
+
+# Check if data was fetched for any cryptocurrency
+if data:
+    for selected_crypto in selected_cryptocurrencies:
+        df = data[selected_crypto]
+
+        # Plotting the data
+        plt.plot(df.index, df['Close'])
+        plt.show()
+
+        # Train test split
+        row = int(len(df) * 0.8)
+        training_data = list(df.iloc[0:row]['Close'])
+        testing_data = list(df.iloc[row:]['Close'])
+
+        # Scale the data
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        scaled_data = scaler.fit_transform(df['Close'].values.reshape(-1, 1))
+
+        prediction_days = 60
+        future_days = [1, 30, 90, 365]
+
+        x_train, y_train = [], []
+        for i in range(prediction_days, len(scaled_data)):
+            x_train.append(scaled_data[i - prediction_days:i, 0])
+            y_train.append(scaled_data[i, 0])
+        x_train, y_train = np.array(x_train), np.array(y_train)
+
+        # Reshape x_train to be compatible with LSTM
+        x_train = np.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1))
+
+        # Create LSTM model
+        lstm_model_filename = 'lstm_model.h5'
+        if os.path.exists(lstm_model_filename):
+            lstm_model = load_lstm_model(lstm_model_filename)
+        else:
+            lstm_model = Sequential()
+            lstm_model.add(LSTM(units=50, return_sequences=True, input_shape=(x_train.shape[1], 1)))
+            lstm_model.add(Dropout(0.3))
+            lstm_model.add(LSTM(units=50, return_sequences=False))
+            lstm_model.add(Dropout(0.3))
+            lstm_model.add(Dense(units=1))
+            lstm_model.compile(optimizer='adam', loss='mean_squared_error')
+            lstm_model.fit(x_train, y_train, epochs=50, batch_size=32, verbose=1)
+            save_lstm_model(lstm_model, lstm_model_filename)
+
+        # Testing the model
+        test_start = dt.datetime(2022, 1, 1)
+        test_end = dt.datetime.now()
+        test_data = yf.download(selected_crypto, start=test_start, end=test_end)
+        actual_prices = test_data['Close'].values
+        total_dataset = pd.concat([df['Close'], test_data['Close']], axis=0)
+        model_inputs = total_dataset[len(total_dataset) - len(test_data) - prediction_days:]
+        model_inputs = np.array(model_inputs).reshape(-1, 1)
+        model_inputs = scaler.transform(model_inputs)
+        x_test = []
+
+        for x in range(prediction_days, len(model_inputs)):
+            x_test.append(model_inputs[x - prediction_days:x, 0])
+        x_test = np.array(x_test)
+        x_test = x_test.reshape(x_test.shape[0], -1)
+        x_test = np.reshape(x_test, (x_test.shape[0], x_test.shape[1], 1))
+
+        prediction_prices = lstm_model.predict(x_test)
+        prediction_prices = scaler.inverse_transform(prediction_prices)
+
+        # Calculate evaluation metrics
+        y_true = actual_prices
+        y_pred = prediction_prices.flatten()
+
+        mae = mean_absolute_error(y_true, y_pred)
+        mse = mean_squared_error(y_true, y_pred)
+        rmse = np.sqrt(mse)
+        mape = np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+
+        # Print evaluation metrics
+        print(f"\nEvaluation metrics for {selected_crypto}:")
+        print(f"  MAE: {mae:.2f}")
+        print(f"  MSE: {mse:.2f}")
+        print(f"  RMSE: {rmse:.2f}")
+        print(f"  MAPE: {mape:.2f}%")
+
+        # Plot Historical data and predictions
+        plt.figure(figsize=(14, 7))
+        plt.plot(np.arange(len(df['Close'])), df['Close'], color='black', label='Historical Prices')
+        plt.plot(np.arange(len(df['Close']), len(df['Close']) + len(prediction_prices)), prediction_prices, color='green', label=f'{selected_crypto} Price Prediction')
+        plt.title(f'{selected_crypto} Price Prediction')
+        plt.xlabel('Date')
+        plt.ylabel('Price')
+        plt.legend(loc='upper left')
+        plt.show()
+
+        # Predict and forecast for each horizon
+        forecasts = {}
+        last_sequence = model_inputs[-prediction_days:]  # Last 60 days of data
+        last_sequence = last_sequence.reshape(1, prediction_days, 1)
+
+        for future_day in future_days:
+            current_input = last_sequence.copy()
+            future_predictions = []
+
+            for _ in range(future_day):
+                # Predict the next day
+                next_day_prediction = lstm_model.predict(current_input, verbose=0)
+                future_predictions.append(next_day_prediction[0, 0])
+
+                # Update the input sequence: drop oldest, add new prediction
+                current_input = np.append(current_input[:, 1:, :], [[[next_day_prediction[0, 0]]]], axis=1)
+
+            # Inverse scale and store
+            future_predictions = scaler.inverse_transform(np.array(future_predictions).reshape(-1, 1))
+            forecasts[future_day] = future_predictions[-1][0]
+
+        # Print all forecasted prices
+        for days, price in forecasts.items():
+            print(f"Forecasted price for {days} days ahead: {price:.2f}")
+
+else:
+    print("No cryptocurrencies found with sufficient data for the last 5 years.")
