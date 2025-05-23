@@ -1,0 +1,163 @@
+import numpy as np
+import pandas as pd
+import yfinance as yf
+import datetime as dt
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.svm import SVR
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+import joblib
+import os
+import warnings
+
+warnings.filterwarnings("ignore")
+
+# Define paths for saving models
+model_dir = "models"
+if not os.path.exists(model_dir):
+    os.makedirs(model_dir)
+
+def save_svr_model(model, filename):
+    """Save the trained SVR model."""
+    joblib.dump(model, os.path.join(model_dir, filename))
+
+def load_svr_model(filename):
+    """Load a trained SVR model."""
+    return joblib.load(os.path.join(model_dir, filename))
+
+# Selected cryptocurrencies based on k-means clustering
+# Example:
+# selected_cryptocurrencies = ['BTC-USD', 'ETH-USD', 'ADA-USD']
+# (You must define 'selected_cryptocurrencies' before running)
+
+# Set the start and end dates for the last 5 years
+end_date = dt.datetime.now()
+start_date = end_date - dt.timedelta(days=5*365)
+
+# Fetch data for the selected cryptocurrencies
+data = {}
+for crypto in selected_cryptocurrencies:
+    try:
+        hist_data = yf.download(crypto, start=start_date, end=end_date)
+
+        if not hist_data.empty and 'Close' in hist_data.columns:
+            if len(hist_data) >= 5 * 365:
+                data[crypto] = hist_data
+            else:
+                print(f"Not enough data for {crypto}. Skipping.")
+        else:
+            print(f"No 'Close' data found for {crypto}. Skipping.")
+    except Exception as e:
+        print(f"Could not fetch data for {crypto}: {e}")
+
+# Check if data was fetched for any cryptocurrency
+if data:
+    for selected_crypto in data.keys():
+        df = data[selected_crypto]
+
+        # Prepare Data
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        scaled_data = scaler.fit_transform(df['Close'].values.reshape(-1, 1))
+
+        prediction_days = 60
+        future_days = [1, 30, 90, 365]
+
+        x_train, y_train = [], []
+        for i in range(prediction_days, len(scaled_data) - max(future_days)):
+            x_train.append(scaled_data[i - prediction_days:i, 0])
+            y_train.append(scaled_data[i, 0])
+
+        x_train, y_train = np.array(x_train), np.array(y_train)
+
+        # Flatten x_train for SVR
+        x_train = x_train.reshape(x_train.shape[0], -1)
+
+        # Split data into training and validation sets
+        split_ratio = 0.8
+        split_index = int(len(x_train) * split_ratio)
+        x_train_split, x_val_split = x_train[:split_index], x_train[split_index:]
+        y_train_split, y_val_split = y_train[:split_index], y_train[split_index:]
+
+        # Create and train the SVR model
+        model = SVR(kernel='rbf', C=100, epsilon=0.1)
+        model.fit(x_train_split, y_train_split)
+
+        # Save the trained model
+        save_svr_model(model, f'svr_model_{selected_crypto}.pkl')
+
+        # Predict validation set
+        y_val_pred = model.predict(x_val_split)
+        y_val_pred = scaler.inverse_transform(y_val_pred.reshape(-1, 1)).flatten()
+        y_val_true = scaler.inverse_transform(y_val_split.reshape(-1, 1)).flatten()
+
+        # Calculate evaluation metrics
+        mae = mean_absolute_error(y_val_true, y_val_pred)
+        mse = mean_squared_error(y_val_true, y_val_pred)
+        rmse = np.sqrt(mse)
+        mape = np.mean(np.abs((y_val_true - y_val_pred) / y_val_true)) * 100
+
+        # Print evaluation metrics
+        print(f"\nEvaluation metrics for {selected_crypto}:")
+        print(f"  MAE: {mae:.2f}")
+        print(f"  MSE: {mse:.2f}")
+        print(f"  RMSE: {rmse:.2f}")
+        print(f"  MAPE: {mape:.2f}%")
+
+        # Predict future prices
+        test_start = dt.datetime(2022, 1, 1)
+        test_end = dt.datetime.now()
+        test_data = yf.download(selected_crypto, start=test_start, end=test_end)
+
+        if not test_data.empty and 'Close' in test_data.columns:
+            actual_prices = test_data['Close'].values
+            total_dataset = pd.concat([df['Close'], test_data['Close']], axis=0)
+
+            model_inputs = total_dataset[len(total_dataset) - len(test_data) - prediction_days:]
+            model_inputs = model_inputs.values.reshape(-1, 1)
+            model_inputs = scaler.transform(model_inputs)
+
+            x_test = []
+            for x in range(prediction_days, len(model_inputs)):
+                x_test.append(model_inputs[x - prediction_days:x, 0])
+
+            x_test = np.array(x_test)
+            x_test = x_test.reshape(x_test.shape[0], -1)
+
+            prediction_prices = model.predict(x_test)
+            prediction_prices = scaler.inverse_transform(prediction_prices.reshape(-1, 1))
+
+            # Plot Historical data and predictions
+            plt.figure(figsize=(14, 7))
+            plt.plot(np.arange(len(df['Close'])), df['Close'], color='black', label='Historical Prices')
+            plt.plot(np.arange(len(df['Close']), len(df['Close']) + len(prediction_prices)), prediction_prices, color='green', label='Predicted Prices')
+            plt.title(f'{selected_crypto} Price Prediction')
+            plt.xlabel('Days')
+            plt.ylabel('Price (USD)')
+            plt.legend()
+            plt.show()
+
+            # Forecast future days
+            forecasts = {}
+            recent_data = scaled_data[-prediction_days:].flatten()
+
+            for future_day in future_days:
+                temp_data = recent_data.copy()
+                for _ in range(future_day):
+                    input_data = temp_data[-prediction_days:].reshape(1, -1)
+                    pred = model.predict(input_data)[0]
+                    temp_data = np.append(temp_data, pred)
+
+                future_pred_scaled = temp_data[-1]
+                future_pred = scaler.inverse_transform([[future_pred_scaled]])
+                forecasts[future_day] = future_pred[0][0]
+
+            # Print predictions
+            print(f"\nForecasted prices for {selected_crypto}:")
+            for day, price in forecasts.items():
+                print(f"  {day} days ahead: ${price:.2f}")
+
+        else:
+            print(f"Test data not available for {selected_crypto}.")
+
+else:
+    print("No cryptocurrencies found with sufficient data for the last 5 years.")
