@@ -1,0 +1,101 @@
+import numpy as np
+import pandas as pd
+import yfinance as yf
+import datetime as dt
+import matplotlib.pyplot as plt
+from prophet import Prophet
+import joblib
+import os
+import warnings
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+warnings.filterwarnings("ignore")
+
+# Define paths for saving models
+model_dir = "models"
+if not os.path.exists(model_dir):
+    os.makedirs(model_dir)
+
+def save_prophet_model(model, filename):
+    """Save the trained Prophet model."""
+    joblib.dump(model, os.path.join(model_dir, filename))
+
+def load_prophet_model(filename):
+    """Load a trained Prophet model."""
+    return joblib.load(os.path.join(model_dir, filename))
+
+# Use your existing selected_cryptos variable
+# Fetch fresh data from Yahoo Finance
+selected_cryptocurrencies = selected_cryptos
+
+# Set the start and end dates for the last 5 years
+end_date = dt.datetime.now()
+start_date = end_date - dt.timedelta(days=5*365)
+
+# Download fresh historical data for each cryptocurrency
+data = pd.DataFrame()
+
+for crypto in selected_cryptocurrencies:
+    crypto_data = yf.download(crypto, start=start_date, end=end_date)['Close']
+    data[crypto] = crypto_data
+
+# Check if data was fetched for any cryptocurrency
+if not data.empty:
+    for selected_crypto in selected_cryptocurrencies:
+        # Prepare Data for Prophet
+        df_prophet = data[[selected_crypto]].reset_index()
+        df_prophet.columns = ['ds', 'y']  # Prophet requires columns 'ds' for dates and 'y' for values
+
+        # Split data into training and validation sets
+        split_date = df_prophet['ds'].max() - pd.DateOffset(days=365)
+        train = df_prophet[df_prophet['ds'] <= split_date]
+        validation = df_prophet[df_prophet['ds'] > split_date]
+
+        # Initialize and fit the Prophet model on training data
+        model = Prophet(daily_seasonality=True, seasonality_mode='multiplicative')
+        model.fit(train)
+        save_prophet_model(model, f'prophet_model_{selected_crypto}.pkl')
+
+        # Forecast for the validation period
+        future = model.make_future_dataframe(periods=365)
+        forecast = model.predict(future)
+
+        # Filter forecast for the validation period
+        forecast_validation = forecast[forecast['ds'] > split_date]
+
+        # Calculate evaluation metrics
+        mae = mean_absolute_error(validation['y'], forecast_validation['yhat'])
+        mse = mean_squared_error(validation['y'], forecast_validation['yhat'])
+        rmse = np.sqrt(mse)
+        mape = np.mean(np.abs((validation['y'] - forecast_validation['yhat']) / validation['y'])) * 100
+
+        # Print evaluation metrics
+        print(f"\nEvaluation metrics for {selected_crypto}:")
+        print(f"  MAE: {mae:.2f}")
+        print(f"  MSE: {mse:.2f}")
+        print(f"  RMSE: {rmse:.2f}")
+        print(f"  MAPE: {mape:.2f}%")
+
+        # Forecast for the next 365 days
+        future = model.make_future_dataframe(periods=365)
+        forecast = model.predict(future)
+
+        # Plot the forecast
+        fig = model.plot(forecast)
+        plt.title(f'{selected_crypto} Price Forecast (Next 1 Year)', fontsize=16)
+        plt.xlabel('Date')
+        plt.ylabel('Price')
+        plt.show()
+
+        # Print forecasted prices for 7, 30, and 90 days ahead
+        print(f"\nPredicted prices for {selected_crypto}:")
+        days_ahead_list = [7, 30, 90]
+        for days in days_ahead_list:
+            target_date = df_prophet['ds'].max() + pd.DateOffset(days=days)
+            # Find the closest date in forecast
+            closest_row = forecast.iloc[(forecast['ds'] - target_date).abs().argsort()[:1]]
+            predicted_price = closest_row['yhat'].values[0]
+            print(f"  {days} days ahead: ${predicted_price:.2f}")
+
+else:
+    print("No cryptocurrencies found with sufficient data for the last 5 years.")
